@@ -3,7 +3,6 @@ package com.wmods.wppenhacer.xposed.features.ponte
 import android.content.SharedPreferences
 import com.wmods.wppenhacer.xposed.core.Feature
 import com.wmods.wppenhacer.xposed.core.WppCore
-import de.robv.android.xposed.XposedBridge
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -110,6 +109,4 @@ class PonteServer(loader: ClassLoader, prefs: SharedPreferences) : Feature(loade
         saida.write(resp.toByteArray())
         saida.flush()
     }
-
-    private fun log(msg: String) = XposedBridge.log("[Ponte] $msg")
 }
