@@ -2,250 +2,137 @@
 package com.wmods.wppenhacer.xposed.features.ponte
 
 import android.content.SharedPreferences
+import android.os.Handler
+import android.os.Looper
 import com.wmods.wppenhacer.xposed.core.Feature
 import com.wmods.wppenhacer.xposed.core.WppCore
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
-class PonteServer(
-    loader: ClassLoader,
-    prefs: SharedPreferences
-) : Feature(loader, prefs) {
-
-    private val PORTA = 8899
+class PonteServer(loader: ClassLoader, prefs: SharedPreferences) : Feature(loader, prefs) {
+    private val porta = 8899
 
     override fun getPluginName(): String = "PonteServer"
 
-    @Throws(Throwable::class)
     override fun doHook() {
         thread(name = "PonteServer", isDaemon = true) {
             try {
-                val server = ServerSocket(PORTA)
-                log("Ponte ouvindo na porta $PORTA")
-
-                while (true) {
-                    val cliente = server.accept()
-                    try {
-                        atende(cliente)
-                    } catch (e: Throwable) {
-                        log("erro ao atender: ${e.message}")
-                    } finally {
+                ServerSocket(porta, 8, InetAddress.getLoopbackAddress()).use { server ->
+                    log("Ponte ouvindo apenas no loopback na porta $porta")
+                    while (true) {
+                        val cliente = server.accept()
                         try {
-                            cliente.close()
-                        } catch (_: Throwable) {}
+                            cliente.soTimeout = 15000
+                            atende(cliente)
+                        } catch (e: Exception) {
+                            log("Erro no atendimento: ${e.javaClass.simpleName}: ${e.message}")
+                        } finally {
+                            try { cliente.close() } catch (_: Exception) {}
+                        }
                     }
                 }
-            } catch (e: Throwable) {
-                log("Ponte falhou ao subir: ${e.message}")
+            } catch (e: Exception) {
+                log("Ponte falhou ao subir: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
     }
 
-    private fun descobrir(): String {
-        val sb = StringBuilder()
-
-        try {
-            val au = WppCore.getActionUser()
-                ?: return "actionUser null"
-
-            log("DESC: actionUser = ${au.javaClass.name}")
-            sb.append("actionUser=${au.javaClass.name}\n")
-
-            val classesVistas = HashSet<String>()
-
-            fun examinar(cls: Class<*>, origem: String) {
-                if (classesVistas.add(cls.name)) {
-                    listarCandidatos(cls, origem, sb)
-                }
+    private fun lerCabecalho(input: InputStream): String {
+        val bytes = ByteArrayOutputStream()
+        val fim = byteArrayOf(13, 10, 13, 10)
+        while (bytes.size() < 8192) {
+            val atual = input.read()
+            if (atual == -1) throw IllegalStateException("cabecalho incompleto")
+            bytes.write(atual)
+            val conteudo = bytes.toByteArray()
+            if (conteudo.size >= 4 && conteudo.takeLast(4).toByteArray().contentEquals(fim)) {
+                return String(conteudo, Charsets.ISO_8859_1)
             }
-
-            examinar(au.javaClass, "actionUser")
-
-            for (f in au.javaClass.declaredFields) {
-                try {
-                    f.isAccessible = true
-                    val valor = f.get(au) ?: continue
-                    examinar(
-                        valor.javaClass,
-                        "campo ${f.name}:${valor.javaClass.simpleName}"
-                    )
-                } catch (e: Throwable) {
-                    log("DESC: erro no campo ${f.name}: ${e.message}")
-                }
-            }
-        } catch (e: Throwable) {
-            sb.append("excecao: ${e.message}")
-            log("DESC excecao: ${e.message}")
         }
-
-        return sb.toString()
-    }
-
-    private fun listarCandidatos(
-        cls: Class<*>,
-        origem: String,
-        sb: StringBuilder
-    ) {
-        try {
-            val metodos = cls.declaredMethods
-
-            log("DESC: classe=${cls.name}, metodos=${metodos.size}")
-
-            // NOVO: mostra todas as assinaturas sem executar métodos
-            for (m in metodos) {
-                val assinatura =
-                    "${cls.name}::${m.name}(" +
-                    m.parameterTypes.joinToString { it.simpleName } +
-                    ") -> ${m.returnType.simpleName}"
-
-                log("METODO [$origem] $assinatura")
-            }
-
-            // Mantém a identificação dos candidatos
-            for (m in metodos) {
-                val tipos = m.parameterTypes
-
-                val temString = tipos.any {
-                    it == String::class.java ||
-                    it == CharSequence::class.java
-                }
-
-                val temJid = tipos.any {
-                    it.name.contains("Jid") ||
-                    it == List::class.java ||
-                    it == java.util.Collection::class.java
-                }
-
-                if (temString && temJid && tipos.size in 2..5) {
-                    val assinatura =
-                        "${cls.name}::${m.name}(" +
-                        tipos.joinToString { it.simpleName } +
-                        ") -> ${m.returnType.simpleName}"
-
-                    log("CAND [$origem] $assinatura")
-                    sb.append(assinatura).append("\n")
-                }
-            }
-        } catch (e: Throwable) {
-            log("DESC erro em ${cls.name}: ${e.message}")
-        }
+        throw IllegalArgumentException("cabecalho muito grande")
     }
 
     private fun atende(cliente: Socket) {
-        val entrada = BufferedReader(
-            InputStreamReader(cliente.getInputStream())
-        )
+        val entrada = cliente.getInputStream()
         val saida = cliente.getOutputStream()
-
-        val requestLine = entrada.readLine() ?: return
-        val partes = requestLine.split(" ")
-
-        if (partes.size < 2) {
-            responde(saida, 400, """{"erro":"request invalido"}""")
-            return
-        }
-
+        val linhas = lerCabecalho(entrada).split("\r\n")
+        val partes = linhas[0].split(' ')
+        if (partes.size < 2) return responde(saida, 400, "request invalido")
         val metodo = partes[0]
-        val caminho = partes[1]
+        val caminho = partes[1].substringBefore('?')
+        val tamanho = linhas.firstOrNull { it.startsWith("Content-Length:", true) }
+            ?.substringAfter(':')?.trim()?.toIntOrNull() ?: -1
 
-        var contentLength = 0
-        var linha: String?
-
-        while (true) {
-            linha = entrada.readLine()
-            if (linha == null || linha.isEmpty()) break
-
-            if (linha.startsWith("Content-Length:", true)) {
-                contentLength =
-                    linha.substringAfter(":").trim().toIntOrNull() ?: 0
+        if (metodo == "GET" && caminho == "/status") {
+            return responde(saida, 200, "ok", JSONObject().put("ok", true))
+        }
+        if (metodo == "GET" && caminho == "/descobrir") {
+            val obj = WppCore.getActionUser()
+            val info = JSONObject().put("actionUser", obj?.javaClass?.name ?: "null")
+            return responde(saida, 200, "diagnostico", info)
+        }
+        if (metodo == "POST" && caminho == "/enviar") {
+            if (tamanho < 1 || tamanho > 16384) return responde(saida, 400, "tamanho invalido")
+            val dados = ByteArray(tamanho)
+            var lidos = 0
+            while (lidos < dados.size) {
+                val n = entrada.read(dados, lidos, dados.size - lidos)
+                if (n == -1) return responde(saida, 400, "corpo incompleto")
+                lidos += n
             }
-        }
-
-        if (metodo == "GET" && caminho.startsWith("/status")) {
-            responde(saida, 200, """{"ok":true}""")
-            return
-        }
-
-        if (metodo == "GET" && caminho.startsWith("/descobrir")) {
-            val res = descobrir()
-            responde(
-                saida,
-                200,
-                JSONObject().put("candidatos", res).toString()
-            )
-            return
-        }
-
-        if (metodo == "POST" && caminho.startsWith("/enviar")) {
-            val corpo = CharArray(contentLength)
-            var lido = 0
-
-            while (lido < contentLength) {
-                val n = entrada.read(
-                    corpo,
-                    lido,
-                    contentLength - lido
-                )
-
-                if (n == -1) break
-                lido += n
+            val json = try {
+                JSONObject(String(dados, Charsets.UTF_8))
+            } catch (_: Exception) {
+                return responde(saida, 400, "json invalido")
             }
-
-            val json = JSONObject(String(corpo, 0, lido))
             val numero = json.optString("numero").trim()
             val texto = json.optString("texto")
-
-            if (numero.isEmpty() || texto.isEmpty()) {
-                responde(
-                    saida,
-                    400,
-                    """{"erro":"numero ou texto vazio"}"""
-                )
-                return
+            if (!numero.matches(Regex("[0-9]{8,15}")) || texto.isBlank() || texto.length > 4000) {
+                return responde(saida, 400, "numero ou texto invalido")
             }
-
-            responde(
-                saida,
-                200,
-                """{"info":"use GET /descobrir primeiro"}"""
-            )
-            return
+            val trava = CountDownLatch(1)
+            var invocado = false
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    invocado = WppCore.sendMessage(numero, texto)
+                } catch (e: Exception) {
+                    log("Erro no envio: ${e.message}")
+                } finally {
+                    trava.countDown()
+                }
+            }
+            if (!trava.await(10, TimeUnit.SECONDS)) return responde(saida, 503, "tempo esgotado")
+            return if (invocado) {
+                responde(saida, 200, "metodo invocado; entrega nao confirmada", JSONObject().put("invocado", true))
+            } else {
+                responde(saida, 503, "metodo de envio incompativel ou indisponivel", JSONObject().put("invocado", false))
+            }
         }
-
-        responde(
-            saida,
-            404,
-            """{"erro":"rota desconhecida"}"""
-        )
+        responde(saida, 404, "rota desconhecida")
     }
 
-    private fun responde(
-        saida: OutputStream,
-        status: Int,
-        json: String
-    ) {
-        val txt = when (status) {
-            200 -> "200 OK"
-            400 -> "400 Bad Request"
-            404 -> "404 Not Found"
-            else -> "$status"
+    private fun responde(saida: OutputStream, status: Int, mensagem: String, extra: JSONObject? = null) {
+        val objeto = extra ?: JSONObject()
+        objeto.put("mensagem", mensagem)
+        val conteudo = objeto.toString().toByteArray(Charsets.UTF_8)
+        val motivo = when (status) {
+            200 -> "OK"
+            400 -> "Bad Request"
+            404 -> "Not Found"
+            503 -> "Service Unavailable"
+            else -> "Error"
         }
-
-        val bytes = json.toByteArray(Charsets.UTF_8)
-
-        val resp = "HTTP/1.1 $txt\r\n" +
-            "Content-Type: application/json; charset=utf-8\r\n" +
-            "Content-Length: ${bytes.size}\r\n" +
-            "Connection: close\r\n\r\n"
-
-        saida.write(resp.toByteArray(Charsets.UTF_8))
-        saida.write(bytes)
+        val cabecalho = "HTTP/1.1 $status $motivo\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${conteudo.size}\r\nConnection: close\r\n\r\n"
+        saida.write(cabecalho.toByteArray(Charsets.UTF_8))
+        saida.write(conteudo)
         saida.flush()
     }
 }
