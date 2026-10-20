@@ -261,7 +261,33 @@ object WppCore {
 
     @JvmStatic
     fun sendMessage(number: String, message: String) {
+        val diag = "[PONTE-DIAG]"
         try {
+            YukiLog.log("$diag actionUser class = ${actionUser?.name}")
+
+            // Enumera TODOS os metodos que o filtro aceita (percorrendo superclasses,
+            // igual ao findMethodUsingFilterIfExists), para detectar ambiguidade.
+            val candidatos = ArrayList<java.lang.reflect.Method>()
+            var cls: Class<*>? = actionUser
+            while (cls != null) {
+                cls.declaredMethods.filterTo(candidatos) { method ->
+                    List::class.java.isAssignableFrom(method.returnType) &&
+                            ReflectionUtils.findIndexOfType(
+                                method.parameterTypes,
+                                String::class.java
+                            ) != -1
+                }
+                cls = cls.superclass
+            }
+            YukiLog.log("$diag candidatos (List+String) = ${candidatos.size}")
+            candidatos.forEachIndexed { i, m ->
+                YukiLog.log(
+                    "$diag candidato[$i] ${m.declaringClass.simpleName}.${m.name}(" +
+                            m.parameterTypes.joinToString { it.simpleName } +
+                            ") -> ${m.returnType.simpleName}"
+                )
+            }
+
             val senderMethod = ReflectionUtils.findMethodUsingFilterIfExists(actionUser) { method ->
                 List::class.java.isAssignableFrom(method.returnType) &&
                         ReflectionUtils.findIndexOfType(
@@ -269,27 +295,49 @@ object WppCore {
                             String::class.java
                         ) != -1
             }
-            if (senderMethod != null) {
-                val userJid = createUserJid("$number@s.whatsapp.net")
-                if (userJid == null) {
-                    Utils.showToast("UserJID not found", Toast.LENGTH_SHORT)
-                    return
-                }
-                val newObject = arrayOfNulls<Any>(senderMethod.parameterCount)
-                for (i in newObject.indices) {
-                    val param = senderMethod.parameterTypes[i]
-                    newObject[i] = ReflectionUtils.getDefaultValue(param)
-                }
-                val index =
-                    ReflectionUtils.findIndexOfType(senderMethod.parameterTypes, String::class.java)
-                newObject[index] = message
-                val index2 =
-                    ReflectionUtils.findIndexOfType(senderMethod.parameterTypes, List::class.java)
-                newObject[index2] = Collections.singletonList(userJid)
-                senderMethod.invoke(getActionUser(), *newObject)
-                Utils.showToast("Message sent to $number", Toast.LENGTH_SHORT)
+
+            if (senderMethod == null) {
+                YukiLog.log("$diag FALHA: nenhum metodo casou com o filtro (List + String)")
+                Utils.showToast("Ponte: metodo de envio nao encontrado", Toast.LENGTH_SHORT)
+                return
             }
+
+            YukiLog.log(
+                "$diag ESCOLHIDO ${senderMethod.declaringClass.simpleName}.${senderMethod.name}(" +
+                        senderMethod.parameterTypes.joinToString { it.simpleName } +
+                        ") -> ${senderMethod.returnType.simpleName}"
+            )
+
+            val userJid = createUserJid("$number@s.whatsapp.net")
+            if (userJid == null) {
+                YukiLog.log("$diag FALHA: createUserJid retornou null para $number")
+                Utils.showToast("UserJID not found", Toast.LENGTH_SHORT)
+                return
+            }
+            YukiLog.log("$diag userJid class = ${userJid.javaClass.name}")
+
+            val newObject = arrayOfNulls<Any>(senderMethod.parameterCount)
+            for (i in newObject.indices) {
+                val param = senderMethod.parameterTypes[i]
+                newObject[i] = ReflectionUtils.getDefaultValue(param)
+            }
+            val index =
+                ReflectionUtils.findIndexOfType(senderMethod.parameterTypes, String::class.java)
+            newObject[index] = message
+            val index2 =
+                ReflectionUtils.findIndexOfType(senderMethod.parameterTypes, List::class.java)
+            newObject[index2] = Collections.singletonList(userJid)
+
+            YukiLog.log(
+                "$diag args: idxString=$index idxList=$index2 tipos=[" +
+                        newObject.joinToString { it?.javaClass?.simpleName ?: "null" } + "]"
+            )
+
+            val ret = senderMethod.invoke(getActionUser(), *newObject)
+            YukiLog.log("$diag invoke OK retorno=${ret?.toString() ?: "null"}")
+            Utils.showToast("Message sent to $number", Toast.LENGTH_SHORT)
         } catch (e: Exception) {
+            YukiLog.log("$diag EXCECAO durante o envio:")
             Utils.showToast("Error in sending message:${e.message}", Toast.LENGTH_SHORT)
             YukiLog.log(e)
         }
