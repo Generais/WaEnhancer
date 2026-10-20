@@ -264,26 +264,42 @@ object WppCore {
         val diag = "[PONTE-DIAG]"
         try {
             val cl = actionUser
-            YukiLog.log("$diag actionUser class = ${cl?.name}")
 
-            // Despeja TODOS os metodos de X.E59 (e superclasses, menos Object),
-            // para identificarmos qual envia texto nesta versao do w4b.
-            var cls: Class<*>? = cl
-            var idx = 0
-            while (cls != null && cls != Any::class.java) {
-                for (m in cls.declaredMethods) {
-                    val params = m.parameterTypes.joinToString { it.simpleName }
-                    YukiLog.log(
-                        "$diag m[$idx] ${cls.simpleName}.${m.name}($params) -> ${m.returnType.simpleName}"
-                    )
-                    idx++
-                }
-                cls = cls.superclass
+            // Metodo de envio de texto no ActionUser (X.E59): assinatura (Jid, String) -> void,
+            // ex.: A00(1eZ, String). Selecionado pela forma, nao pelo nome ofuscado,
+            // para sobreviver a renomeacoes entre versoes do w4b.
+            val senderMethod = ReflectionUtils.findMethodUsingFilterIfExists(cl) { method ->
+                method.parameterCount == 2 &&
+                        method.returnType == Void.TYPE &&
+                        method.parameterTypes[1] == String::class.java &&
+                        method.parameterTypes[0] != String::class.java
             }
-            YukiLog.log("$diag total de metodos listados = $idx")
-            Utils.showToast("Ponte: diagnostico de metodos gerado (veja logcat)", Toast.LENGTH_SHORT)
+
+            if (senderMethod == null) {
+                YukiLog.log("$diag FALHA: metodo (Jid,String)->void nao encontrado em ${cl?.name}")
+                Utils.showToast("Ponte: metodo de envio nao encontrado", Toast.LENGTH_SHORT)
+                return
+            }
+
+            val jidType = senderMethod.parameterTypes[0]
+            YukiLog.log("$diag metodo escolhido ${senderMethod.name}(${jidType.simpleName}, String) -> void")
+
+            val userJid = createUserJid("$number@s.whatsapp.net")
+            if (userJid == null) {
+                YukiLog.log("$diag FALHA: createUserJid retornou null para $number")
+                Utils.showToast("UserJID not found", Toast.LENGTH_SHORT)
+                return
+            }
+
+            val compat = jidType.isAssignableFrom(userJid.javaClass)
+            YukiLog.log("$diag userJid=${userJid.javaClass.name} esperado=${jidType.name} compativel=$compat")
+
+            senderMethod.invoke(getActionUser(), userJid, message)
+            YukiLog.log("$diag invoke OK -> texto enviado para $number")
+            Utils.showToast("Message sent to $number", Toast.LENGTH_SHORT)
         } catch (e: Exception) {
-            YukiLog.log("$diag EXCECAO no dump de metodos:")
+            YukiLog.log("$diag EXCECAO no envio:")
+            Utils.showToast("Error in sending message:${e.message}", Toast.LENGTH_SHORT)
             YukiLog.log(e)
         }
     }
