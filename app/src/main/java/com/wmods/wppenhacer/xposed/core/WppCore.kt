@@ -66,6 +66,12 @@ object WppCore {
     private var mWaJidMapRepository: Any? = null
     private var convertJidToLid: Method? = null
     private var actionUser: Class<*>? = null
+
+    // Envio de texto real (UserActionsTextMessageSending / X.C6HR):
+    // classe + instancia cacheada; o metodo A07(Jid, String) -> void envia.
+    private var textSenderClass: Class<*>? = null
+    private var mTextSender: Any? = null
+
     private var cachedMessageStoreKey: Method? = null
     private var conversationJidField: Field? = null
     private var meManagerPhoneJidField: Field? = null
@@ -113,6 +119,18 @@ object WppCore {
                 after {
                     mActionUser = instance
                 }
+            }
+
+            // UserActionsTextMessageSending (envio de texto real nesta versao)
+            try {
+                textSenderClass = Unobfuscator.findFirstClassUsingStrings(
+                    loader,
+                    StringMatchType.Contains,
+                    "UserActionsTextMessageSending/createFMessageTextFromUserInputs"
+                )
+                YukiLog.log("TextSender: ${textSenderClass?.name}")
+            } catch (e: Exception) {
+                YukiLog.log(e)
             }
 
             // CachedMessageStore
@@ -263,26 +281,19 @@ object WppCore {
     fun sendMessage(number: String, message: String) {
         val diag = "[PONTE-DIAG]"
         try {
-            val cl = actionUser
-
-            // Metodo de envio de texto no ActionUser (X.E59): assinatura (Jid, String) -> void,
-            // ex.: A00(1eZ, String). Selecionado pela forma, nao pelo nome ofuscado,
-            // para sobreviver a renomeacoes entre versoes do w4b.
-            val senderMethod = ReflectionUtils.findMethodUsingFilterIfExists(cl) { method ->
-                method.parameterCount == 2 &&
-                        method.returnType == Void.TYPE &&
-                        method.parameterTypes[1] == String::class.java &&
-                        method.parameterTypes[0] != String::class.java
-            }
-
-            if (senderMethod == null) {
-                YukiLog.log("$diag FALHA: metodo (Jid,String)->void nao encontrado em ${cl?.name}")
-                Utils.showToast("Ponte: metodo de envio nao encontrado", Toast.LENGTH_SHORT)
+            val senderClass = textSenderClass
+            if (senderClass == null) {
+                YukiLog.log("$diag FALHA: classe de envio de texto (UserActionsTextMessageSending) nao resolvida")
+                Utils.showToast("Ponte: envio de texto indisponivel", Toast.LENGTH_SHORT)
                 return
             }
 
-            val jidType = senderMethod.parameterTypes[0]
-            YukiLog.log("$diag metodo escolhido ${senderMethod.name}(${jidType.simpleName}, String) -> void")
+            // Instancia a classe de envio (campos vem do container global de servicos).
+            if (mTextSender == null) {
+                val ctor = senderClass.getDeclaredConstructor()
+                ctor.isAccessible = true
+                mTextSender = ctor.newInstance()
+            }
 
             val userJid = createUserJid("$number@s.whatsapp.net")
             if (userJid == null) {
@@ -291,10 +302,24 @@ object WppCore {
                 return
             }
 
-            val compat = jidType.isAssignableFrom(userJid.javaClass)
-            YukiLog.log("$diag userJid=${userJid.javaClass.name} esperado=${jidType.name} compativel=$compat")
+            // Metodo de envio de texto: A07(Jid, String) -> void.
+            // Selecionado pela forma (2 params, void, 2o = String, 1o = Jid aceita o userJid),
+            // para sobreviver a renomeacoes de ofuscacao entre versoes.
+            val sendText = ReflectionUtils.findMethodUsingFilter(senderClass) { m ->
+                m.parameterCount == 2 &&
+                        m.returnType == Void.TYPE &&
+                        m.parameterTypes[1] == String::class.java &&
+                        m.parameterTypes[0] != String::class.java &&
+                        m.parameterTypes[0].isAssignableFrom(userJid.javaClass)
+            }
 
-            senderMethod.invoke(getActionUser(), userJid, message)
+            YukiLog.log(
+                "$diag enviando via ${senderClass.simpleName}.${sendText.name}(" +
+                        "${sendText.parameterTypes[0].simpleName}, String)"
+            )
+
+            sendText.invoke(mTextSender, userJid, message)
+
             YukiLog.log("$diag invoke OK -> texto enviado para $number")
             Utils.showToast("Message sent to $number", Toast.LENGTH_SHORT)
         } catch (e: Exception) {
