@@ -10,6 +10,7 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.Collections
 import kotlin.concurrent.thread
 
 class PonteServer(
@@ -54,32 +55,30 @@ class PonteServer(
                 ?: return "actionUser null"
 
             log("DESC: actionUser = ${au.javaClass.name}")
-
             sb.append("actionUser=${au.javaClass.name}\n")
 
-            listarCandidatos(
-                au.javaClass,
-                "actionUser",
-                sb
-            )
+            val classesVistas = HashSet<String>()
+
+            fun examinar(cls: Class<*>, origem: String) {
+                if (classesVistas.add(cls.name)) {
+                    listarCandidatos(cls, origem, sb)
+                }
+            }
+
+            examinar(au.javaClass, "actionUser")
 
             for (f in au.javaClass.declaredFields) {
                 try {
                     f.isAccessible = true
-
                     val valor = f.get(au) ?: continue
-                    val cls = valor.javaClass
-
-                    listarCandidatos(
-                        cls,
-                        "campo ${f.name}:${cls.simpleName}",
-                        sb
+                    examinar(
+                        valor.javaClass,
+                        "campo ${f.name}:${valor.javaClass.simpleName}"
                     )
                 } catch (e: Throwable) {
                     log("DESC: erro no campo ${f.name}: ${e.message}")
                 }
             }
-
         } catch (e: Throwable) {
             sb.append("excecao: ${e.message}")
             log("DESC excecao: ${e.message}")
@@ -93,32 +92,48 @@ class PonteServer(
         origem: String,
         sb: StringBuilder
     ) {
-        // NOVO: registra quantos métodos existem na classe
-        log("DESC: classe=${cls.name}, metodos=${cls.declaredMethods.size}")
+        try {
+            val metodos = cls.declaredMethods
 
-        for (m in cls.declaredMethods) {
-            val tipos = m.parameterTypes
+            log("DESC: classe=${cls.name}, metodos=${metodos.size}")
 
-            val temString = tipos.any {
-                it == String::class.java ||
-                it == CharSequence::class.java
-            }
-
-            val temJid = tipos.any {
-                it.name.contains("Jid") ||
-                it == List::class.java ||
-                it == java.util.Collection::class.java
-            }
-
-            if (temString && temJid && tipos.size in 2..5) {
+            // NOVO: mostra todas as assinaturas sem executar métodos
+            for (m in metodos) {
                 val assinatura =
                     "${cls.name}::${m.name}(" +
-                    tipos.joinToString { it.simpleName } +
+                    m.parameterTypes.joinToString { it.simpleName } +
                     ") -> ${m.returnType.simpleName}"
 
-                log("CAND [$origem] $assinatura")
-                sb.append(assinatura).append("\n")
+                log("METODO [$origem] $assinatura")
             }
+
+            // Mantém a identificação dos candidatos
+            for (m in metodos) {
+                val tipos = m.parameterTypes
+
+                val temString = tipos.any {
+                    it == String::class.java ||
+                    it == CharSequence::class.java
+                }
+
+                val temJid = tipos.any {
+                    it.name.contains("Jid") ||
+                    it == List::class.java ||
+                    it == java.util.Collection::class.java
+                }
+
+                if (temString && temJid && tipos.size in 2..5) {
+                    val assinatura =
+                        "${cls.name}::${m.name}(" +
+                        tipos.joinToString { it.simpleName } +
+                        ") -> ${m.returnType.simpleName}"
+
+                    log("CAND [$origem] $assinatura")
+                    sb.append(assinatura).append("\n")
+                }
+            }
+        } catch (e: Throwable) {
+            log("DESC erro em ${cls.name}: ${e.message}")
         }
     }
 
@@ -159,7 +174,6 @@ class PonteServer(
 
         if (metodo == "GET" && caminho.startsWith("/descobrir")) {
             val res = descobrir()
-
             responde(
                 saida,
                 200,
@@ -223,12 +237,15 @@ class PonteServer(
             else -> "$status"
         }
 
-        val resp = "HTTP/1.1 $txt\r\n" +
-            "Content-Type: application/json\r\n" +
-            "Content-Length: ${json.toByteArray().size}\r\n" +
-            "Connection: close\r\n\r\n" + json
+        val bytes = json.toByteArray(Charsets.UTF_8)
 
-        saida.write(resp.toByteArray())
+        val resp = "HTTP/1.1 $txt\r\n" +
+            "Content-Type: application/json; charset=utf-8\r\n" +
+            "Content-Length: ${bytes.size}\r\n" +
+            "Connection: close\r\n\r\n"
+
+        saida.write(resp.toByteArray(Charsets.UTF_8))
+        saida.write(bytes)
         saida.flush()
     }
 }
