@@ -9,6 +9,7 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.Collections
 import kotlin.concurrent.thread
 
 class PonteServer(loader: ClassLoader, prefs: SharedPreferences) : Feature(loader, prefs) {
@@ -36,6 +37,79 @@ class PonteServer(loader: ClassLoader, prefs: SharedPreferences) : Feature(loade
             } catch (e: Throwable) {
                 log("Ponte falhou ao subir: ${e.message}")
             }
+        }
+    }
+
+    private fun enviaComDiagnostico(numero: String, texto: String): String {
+        try {
+            val actionUserObj = WppCore.getActionUser()
+            if (actionUserObj == null) {
+                log("DIAG: getActionUser() retornou null")
+                return "actionUser null"
+            }
+            log("DIAG: actionUser class = ${actionUserObj.javaClass.name}")
+
+            var senderMethod: java.lang.reflect.Method? = null
+            for (m in actionUserObj.javaClass.declaredMethods) {
+                val retornaList = List::class.java.isAssignableFrom(m.returnType)
+                val temString = m.parameterTypes.any { it == String::class.java }
+                val temList = m.parameterTypes.any { it == List::class.java }
+                if (retornaList && temString && temList) {
+                    senderMethod = m
+                    break
+                }
+            }
+            if (senderMethod == null) {
+                log("DIAG: metodo de envio (String,List)->List NAO encontrado em ${actionUserObj.javaClass.name}")
+                val assinaturas = actionUserObj.javaClass.declaredMethods.take(25).joinToString("\n") {
+                    "${it.name}(${it.parameterTypes.joinToString { p -> p.simpleName }}) -> ${it.returnType.simpleName}"
+                }
+                log("DIAG metodos disponiveis:\n$assinaturas")
+                return "sender method nao encontrado"
+            }
+            senderMethod.isAccessible = true
+            log("DIAG: sender = ${senderMethod.name}(${senderMethod.parameterTypes.joinToString { it.simpleName }})")
+
+            var userJid = WppCore.createUserJid("$numero@s.whatsapp.net")
+            if (userJid == null) {
+                log("DIAG: Jid @s.whatsapp.net null, tentando @lid")
+                userJid = WppCore.createUserJid("$numero@lid")
+            }
+            if (userJid == null) {
+                log("DIAG: createUserJid retornou null nos dois formatos")
+                return "userJid null"
+            }
+            log("DIAG: userJid class = ${userJid.javaClass.name}")
+
+            val params = arrayOfNulls<Any>(senderMethod.parameterCount)
+            for (i in params.indices) {
+                params[i] = valorPadrao(senderMethod.parameterTypes[i])
+            }
+            val idxString = senderMethod.parameterTypes.indexOfFirst { it == String::class.java }
+            val idxList = senderMethod.parameterTypes.indexOfFirst { it == List::class.java }
+            params[idxString] = texto
+            params[idxList] = Collections.singletonList(userJid)
+
+            val resultado = senderMethod.invoke(actionUserObj, *params)
+            log("DIAG: invoke OK, resultado = $resultado")
+            return "ok"
+        } catch (e: Throwable) {
+            log("DIAG: EXCECAO: ${e.javaClass.simpleName}: ${e.message}")
+            return "excecao: ${e.message}"
+        }
+    }
+
+    private fun valorPadrao(tipo: Class<*>): Any? {
+        return when (tipo) {
+            java.lang.Boolean.TYPE -> false
+            java.lang.Integer.TYPE -> 0
+            java.lang.Long.TYPE -> 0L
+            java.lang.Float.TYPE -> 0f
+            java.lang.Double.TYPE -> 0.0
+            java.lang.Byte.TYPE -> 0.toByte()
+            java.lang.Short.TYPE -> 0.toShort()
+            java.lang.Character.TYPE -> '\u0000'
+            else -> null
         }
     }
 
@@ -81,14 +155,10 @@ class PonteServer(loader: ClassLoader, prefs: SharedPreferences) : Feature(loade
                 return
             }
 
-            try {
-                WppCore.sendMessage(numero, texto)
-                log("enviado para $numero")
-                responde(saida, 200, "{\"ok\":true,\"numero\":\"$numero\"}")
-            } catch (e: Throwable) {
-                log("falha ao enviar: ${e.message}")
-                responde(saida, 500, "{\"erro\":\"${e.message}\"}")
-            }
+            val diag = enviaComDiagnostico(numero, texto)
+            log("resultado envio p/ $numero: $diag")
+            val jsonResp = JSONObject().put("resultado", diag).put("numero", numero).toString()
+            responde(saida, 200, jsonResp)
             return
         }
 
